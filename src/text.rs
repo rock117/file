@@ -62,7 +62,12 @@ fn decode_text(data: &[u8]) -> (String, String, bool) {
 
     // Try UTF-8 first
     match String::from_utf8(data.to_vec()) {
-        Ok(s) => return ("utf-8".to_string(), s, false),
+        Ok(s) => {
+            // Check if it's pure ASCII (no bytes > 127)
+            let is_ascii = data.iter().all(|&b| b <= 0x7F);
+            let enc = if is_ascii { "ascii" } else { "utf-8" };
+            return (enc.to_string(), s, false);
+        }
         Err(_) => {}
     }
 
@@ -337,21 +342,18 @@ pub fn is_text(data: &[u8]) -> bool {
 }
 
 /// Format text info into a description string like the Linux `file` command
-pub fn format_text_description(info: &TextInfo, path: &std::path::Path) -> String {
+pub fn format_text_description(info: &TextInfo) -> String {
     let mut parts = Vec::new();
 
-    // Language/type hint first
+    let enc_desc = format_encoding(&info.encoding, info.with_bom);
+
+    // Language/type hint first, then encoding (matches Linux format)
     if let Some(ref lang) = info.language_hint {
         parts.push(lang.clone());
-    }
-
-    // Encoding
-    let enc = if info.with_bom {
-        format!("{} (with BOM)", info.encoding)
+        parts.push(enc_desc);
     } else {
-        info.encoding.clone()
-    };
-    parts.push(format!("{} Unicode text", enc));
+        parts.push(enc_desc);
+    }
 
     // Line ending (only if non-standard)
     match info.line_ending.as_str() {
@@ -367,31 +369,17 @@ pub fn format_text_description(info: &TextInfo, path: &std::path::Path) -> Strin
         parts.push("with very long lines".to_string());
     }
 
-    let desc = parts.join(", ");
-
-    // Add size info
-    let size = if let Ok(meta) = std::fs::metadata(path) {
-        format!(" ({})", format_size(meta.len()))
-    } else {
-        String::new()
-    };
-
-    format!("{}{}", desc, size)
+    parts.join(", ")
 }
 
-/// Format file size in human-readable form
-pub fn format_size(bytes: u64) -> String {
-    const KB: u64 = 1024;
-    const MB: u64 = KB * 1024;
-    const GB: u64 = MB * 1024;
-
-    if bytes < KB {
-        format!("{} bytes", bytes)
-    } else if bytes < MB {
-        format!("{:.1} KiB", bytes as f64 / KB as f64)
-    } else if bytes < GB {
-        format!("{:.1} MiB", bytes as f64 / MB as f64)
-    } else {
-        format!("{:.1} GiB", bytes as f64 / GB as f64)
+/// Format encoding name to match Linux `file` output
+pub fn format_encoding(encoding: &str, with_bom: bool) -> String {
+    match encoding {
+        "ascii" => "ASCII text".to_string(),
+        "utf-8" if with_bom => "UTF-8 Unicode (with BOM) text".to_string(),
+        "utf-8" => "UTF-8 Unicode text".to_string(),
+        "utf-16le" => "Little-endian UTF-16 Unicode text".to_string(),
+        "utf-16be" => "Big-endian UTF-16 Unicode text".to_string(),
+        _ => "Non-ISO extended-ASCII text".to_string(),
     }
 }

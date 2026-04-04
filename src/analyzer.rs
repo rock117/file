@@ -6,21 +6,18 @@ use std::path::Path;
 use crate::magic;
 use crate::text;
 
-const READ_SIZE: usize = 64 * 1024; // Read first 64KB for magic detection
+const READ_SIZE: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub struct FileResult {
     pub path: String,
     pub description: String,
     pub mime_type: Option<String>,
-    pub is_text: bool,
 }
 
-/// Analyze a single file
 pub fn analyze_file(path: &Path) -> FileResult {
     let display_path = path.to_string_lossy().to_string();
 
-    // Check if it's a special file
     let metadata = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) => {
@@ -29,14 +26,12 @@ pub fn analyze_file(path: &Path) -> FileResult {
                 path: dp.to_string(),
                 description: format!("cannot open: {} ({})", dp, e),
                 mime_type: None,
-                is_text: false,
             };
         }
     };
 
     let file_type = metadata.file_type();
 
-    // Handle special file types
     if file_type.is_symlink() {
         let target = fs::read_link(path)
             .map(|t| t.to_string_lossy().to_string())
@@ -45,7 +40,6 @@ pub fn analyze_file(path: &Path) -> FileResult {
             path: display_path,
             description: format!("symbolic link to '{}'", target),
             mime_type: None,
-            is_text: false,
         };
     }
 
@@ -53,150 +47,125 @@ pub fn analyze_file(path: &Path) -> FileResult {
     {
         use std::os::unix::fs::FileTypeExt;
         if file_type.is_block_device() {
-            return FileResult {
-                path: display_path,
-                description: "block special".to_string(),
-                mime_type: None,
-                is_text: false,
-            };
+            return FileResult { path: display_path, description: "block special".to_string(), mime_type: None };
         }
         if file_type.is_char_device() {
-            return FileResult {
-                path: display_path,
-                description: "character special".to_string(),
-                mime_type: None,
-                is_text: false,
-            };
+            return FileResult { path: display_path, description: "character special".to_string(), mime_type: None };
         }
         if file_type.is_fifo() {
-            return FileResult {
-                path: display_path,
-                description: "fifo (named pipe)".to_string(),
-                mime_type: None,
-                is_text: false,
-            };
+            return FileResult { path: display_path, description: "fifo (named pipe)".to_string(), mime_type: None };
         }
         if file_type.is_socket() {
-            return FileResult {
-                path: display_path,
-                description: "socket".to_string(),
-                mime_type: None,
-                is_text: false,
-            };
+            return FileResult { path: display_path, description: "socket".to_string(), mime_type: None };
         }
     }
 
     if file_type.is_dir() {
-        return FileResult {
-            path: display_path,
-            description: "directory".to_string(),
-            mime_type: None,
-            is_text: false,
-        };
+        return FileResult { path: display_path, description: "directory".to_string(), mime_type: None };
     }
 
-    // Empty file
     if metadata.len() == 0 {
-        return FileResult {
-            path: display_path,
-            description: "empty".to_string(),
-            mime_type: None,
-            is_text: true,
-        };
+        return FileResult { path: display_path, description: "empty".to_string(), mime_type: None };
     }
 
-    // Read file header for magic detection
     let data = match read_file_header(path) {
         Some(d) => d,
         None => {
             let dp = path.display();
-            return FileResult {
-                path: dp.to_string(),
-                description: format!("cannot read: {}", dp),
-                mime_type: None,
-                is_text: false,
-            };
+            return FileResult { path: dp.to_string(), description: format!("cannot read: {}", dp), mime_type: None };
         }
     };
 
     // Try magic number detection first
     if let Some(match_result) = magic::identify_by_magic(&data) {
-        // Check if we should add more details for text files identified by magic
-        let mut desc = match_result.description.clone();
-
-        // For some formats, add size info
-        let size_str = format!(" ({})", text::format_size(metadata.len()));
-        if desc.contains("image data") || desc.contains("compressed") || desc.contains("archive") {
-            desc = format!("{}{}", desc, size_str);
-        }
-
         return FileResult {
             path: display_path,
-            description: desc,
+            description: match_result.description,
             mime_type: Some(match_result.mime_type),
-            is_text: false,
         };
     }
 
-    // Not identified by magic - check if it's text
+    // Check if it's text
     if text::is_text(&data) {
-        // For text files, prefer extension-based identification when available
-        // (source code files are better identified by extension than content heuristics)
+        // Analyze encoding from content
+        let info = text::analyze_text(&data);
+        let enc_desc = text::format_encoding(&info.encoding, info.with_bom);
+
+        // Try extension-based type identification
         if let Some(ext_match) = magic::guess_by_extension(path) {
-            let size_str = format!(" ({})", text::format_size(metadata.len()));
+            if ext_match.text_type {
+                // Combine type name + encoding + line ending info
+                let mut parts = Vec::new();
+                if !ext_match.description.is_empty() {
+                    parts.push(ext_match.description);
+                    parts.push(enc_desc);
+                } else {
+                    // Plain text (e.g. .txt) - just show encoding
+                    parts.push(enc_desc);
+                }
+                append_line_info(&mut parts, &info);
+                return FileResult {
+                    path: display_path,
+                    description: parts.join(", "),
+                    mime_type: Some(ext_match.mime_type),
+                };
+            }
+            // Non-text extension match (shouldn't normally reach here for text files)
             return FileResult {
                 path: display_path,
-                description: format!("{}{}", ext_match.description, size_str),
+                description: ext_match.description,
                 mime_type: Some(ext_match.mime_type),
-                is_text: true,
             };
         }
 
-        // No known extension - use content analysis
-        let info = text::analyze_text(&data);
-        let desc = text::format_text_description(&info, path);
+        // No known extension - use content heuristics
+        let desc = text::format_text_description(&info);
         let mime = guess_mime_from_text(&info);
-
         return FileResult {
             path: display_path,
             description: desc,
             mime_type: mime,
-            is_text: true,
         };
     }
 
-    // Try extension-based identification as fallback
+    // Binary: try extension as fallback
     if let Some(match_result) = magic::guess_by_extension(path) {
-        let size_str = format!(" ({})", text::format_size(metadata.len()));
         return FileResult {
             path: display_path,
-            description: format!("{}{}", match_result.description, size_str),
+            description: match_result.description,
             mime_type: Some(match_result.mime_type),
-            is_text: false,
         };
     }
 
-    // Unknown binary file
     FileResult {
         path: display_path,
-        description: format!("data ({})", text::format_size(metadata.len())),
+        description: "data".to_string(),
         mime_type: Some("application/octet-stream".to_string()),
-        is_text: false,
     }
 }
 
-/// Read the first READ_SIZE bytes of a file
+fn append_line_info(parts: &mut Vec<String>, info: &text::TextInfo) {
+    match info.line_ending.as_str() {
+        "CRLF" => parts.push("with CRLF line terminators".to_string()),
+        "CR" => parts.push("with CR line terminators".to_string()),
+        "no line terminators" => parts.push("with no line terminators".to_string()),
+        "mixed" => parts.push("with mixed line terminators".to_string()),
+        _ => {}
+    }
+    if info.has_long_lines {
+        parts.push("with very long lines".to_string());
+    }
+}
+
 fn read_file_header(path: &Path) -> Option<Vec<u8>> {
     use std::io::Read;
     let mut file = fs::File::open(path).ok()?;
     let file_size = file.metadata().ok()?.len() as usize;
     let read_len = file_size.min(READ_SIZE);
     let mut buf = vec![0u8; read_len];
-    // Try exact read first; fall back to partial read
     match file.read_exact(&mut buf) {
         Ok(()) => Some(buf),
         Err(_) => {
-            // File might be smaller than expected or read error
             let mut file = fs::File::open(path).ok()?;
             let bytes_read = file.read(&mut buf).ok()?;
             buf.truncate(bytes_read);
@@ -205,7 +174,6 @@ fn read_file_header(path: &Path) -> Option<Vec<u8>> {
     }
 }
 
-/// Guess MIME type from text analysis results
 fn guess_mime_from_text(info: &text::TextInfo) -> Option<String> {
     if let Some(ref lang) = info.language_hint {
         let mime = match lang.as_str() {
@@ -238,13 +206,11 @@ fn guess_mime_from_text(info: &text::TextInfo) -> Option<String> {
     Some("text/plain".to_string())
 }
 
-/// Read from stdin (for `file -` usage)
 pub fn analyze_stdin() -> FileResult {
     use std::io::Read;
     let mut buf = Vec::new();
     let stdin = std::io::stdin();
     let handle = stdin.lock();
-    // Read up to READ_SIZE bytes
     let limited = handle.take(READ_SIZE as u64);
     for byte in limited.bytes() {
         match byte {
@@ -258,39 +224,25 @@ pub fn analyze_stdin() -> FileResult {
             path: "/dev/stdin".to_string(),
             description: "empty".to_string(),
             mime_type: None,
-            is_text: true,
         };
     }
 
-    // Try magic detection
     if let Some(match_result) = magic::identify_by_magic(&buf) {
         return FileResult {
             path: "/dev/stdin".to_string(),
             description: match_result.description,
             mime_type: Some(match_result.mime_type),
-            is_text: false,
         };
     }
 
-    // Check if text
     if text::is_text(&buf) {
         let info = text::analyze_text(&buf);
+        let desc = text::format_text_description(&info);
         let mime = guess_mime_from_text(&info);
-        let mut parts = Vec::new();
-        if let Some(ref lang) = info.language_hint {
-            parts.push(lang.clone());
-        }
-        parts.push(format!("{} Unicode text", info.encoding));
-        if info.line_ending == "CRLF" {
-            parts.push("with CRLF line terminators".to_string());
-        } else if info.line_ending == "no line terminators" {
-            parts.push("with no line terminators".to_string());
-        }
         return FileResult {
             path: "/dev/stdin".to_string(),
-            description: parts.join(", "),
+            description: desc,
             mime_type: mime,
-            is_text: true,
         };
     }
 
@@ -298,6 +250,5 @@ pub fn analyze_stdin() -> FileResult {
         path: "/dev/stdin".to_string(),
         description: "data".to_string(),
         mime_type: Some("application/octet-stream".to_string()),
-        is_text: false,
     }
 }

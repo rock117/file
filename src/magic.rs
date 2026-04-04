@@ -7,6 +7,8 @@ use std::path::Path;
 pub struct MagicMatch {
     pub description: String,
     pub mime_type: String,
+    /// If true, description is a type hint and should be combined with encoding info
+    pub text_type: bool,
 }
 
 struct MagicRule {
@@ -247,7 +249,7 @@ fn analyze_pe(data: &[u8]) -> String {
         return format!("PE32 executable ({})", arch);
     }
     let opt_magic = u16::from_le_bytes([data[opt_offset], data[opt_offset + 1]]);
-    let (pe_type, subsystem_offset) = match opt_magic {
+    let (_pe_type, subsystem_offset) = match opt_magic {
         0x10B => ("32-bit", opt_offset + 68),
         0x20B => ("32-bit+ (PE32+)", opt_offset + 68),
         _ => return format!("PE32 executable ({})", arch),
@@ -262,7 +264,7 @@ fn analyze_pe(data: &[u8]) -> String {
     let sub_desc = match subsystem {
         1 => "native",
         2 => "console",
-        3 => "Windows GUI",
+        3 => "GUI",
         7 => "POSIX",
         9 => "Windows CE",
         10 => "EFI",
@@ -270,13 +272,13 @@ fn analyze_pe(data: &[u8]) -> String {
         12 => "EFI runtime driver",
         13 => "EFI ROM",
         14 => "Xbox",
-        _ => "unknown subsystem",
+        _ => "unknown",
     };
 
     if is_dll {
-        format!("PE32+ DLL ({}, {})", arch, pe_type)
+        format!("PE32+ dynamic link library (DLL) ({}) {}, for MS Windows", sub_desc, arch)
     } else {
-        format!("PE32+ executable ({}, {}, {})", arch, pe_type, sub_desc)
+        format!("PE32+ executable ({}) {}, for MS Windows", sub_desc, arch)
     }
 }
 
@@ -407,6 +409,7 @@ pub fn identify_by_magic(data: &[u8]) -> Option<MagicMatch> {
         return Some(MagicMatch {
             description: desc,
             mime_type: "application/x-dosexec".to_string(),
+            text_type: false,
         });
     }
 
@@ -416,6 +419,7 @@ pub fn identify_by_magic(data: &[u8]) -> Option<MagicMatch> {
         return Some(MagicMatch {
             description: desc,
             mime_type: "application/x-elf".to_string(),
+            text_type: false,
         });
     }
 
@@ -424,6 +428,7 @@ pub fn identify_by_magic(data: &[u8]) -> Option<MagicMatch> {
         return Some(MagicMatch {
             description: analyze_ogg(data),
             mime_type: "application/ogg".to_string(),
+            text_type: false,
         });
     }
 
@@ -432,6 +437,7 @@ pub fn identify_by_magic(data: &[u8]) -> Option<MagicMatch> {
         return Some(MagicMatch {
             description: analyze_gzip(data),
             mime_type: "application/gzip".to_string(),
+            text_type: false,
         });
     }
 
@@ -477,6 +483,7 @@ pub fn identify_by_magic(data: &[u8]) -> Option<MagicMatch> {
             return Some(MagicMatch {
                 description: format!("{} data", desc),
                 mime_type: mime.to_string(),
+                text_type: false,
             });
         }
     }
@@ -488,6 +495,7 @@ pub fn identify_by_magic(data: &[u8]) -> Option<MagicMatch> {
         return Some(MagicMatch {
             description: "Microsoft compound document (OLE2)".to_string(),
             mime_type: "application/msword".to_string(),
+            text_type: false,
         });
     }
 
@@ -498,6 +506,7 @@ pub fn identify_by_magic(data: &[u8]) -> Option<MagicMatch> {
             return Some(MagicMatch {
                 description: "XML 1.0 document text (UTF-8 BOM)".to_string(),
                 mime_type: "text/xml".to_string(),
+                text_type: false,
             });
         }
         // Direct XML
@@ -505,6 +514,7 @@ pub fn identify_by_magic(data: &[u8]) -> Option<MagicMatch> {
             return Some(MagicMatch {
                 description: "XML 1.0 document text".to_string(),
                 mime_type: "text/xml".to_string(),
+                text_type: false,
             });
         }
     }
@@ -526,6 +536,7 @@ pub fn identify_by_magic(data: &[u8]) -> Option<MagicMatch> {
             return Some(MagicMatch {
                 description: rule.description.to_string(),
                 mime_type: rule.mime_type.to_string(),
+                text_type: false,
             });
         }
     }
@@ -536,168 +547,166 @@ pub fn identify_by_magic(data: &[u8]) -> Option<MagicMatch> {
 /// Try to guess file type from extension as fallback
 pub fn guess_by_extension(path: &Path) -> Option<MagicMatch> {
     let ext = path.extension()?.to_str()?.to_lowercase();
-    let (desc, mime) = match ext.as_str() {
-        // Programming languages
-        "rs" => ("Rust source, UTF-8 Unicode text", "text/rust"),
-        "c" => ("C source, ASCII text", "text/x-c"),
-        "h" => ("C header, ASCII text", "text/x-c"),
-        "cpp" | "cc" | "cxx" => ("C++ source, ASCII text", "text/x-c++"),
-        "hpp" | "hh" | "hxx" => ("C++ header, ASCII text", "text/x-c++"),
-        "java" => ("Java source, ASCII text", "text/x-java"),
-        "py" => ("Python source, ASCII text", "text/x-python"),
-        "js" => ("JavaScript source, ASCII text", "text/javascript"),
-        "ts" => ("TypeScript source, ASCII text", "text/typescript"),
-        "mts" | "cts" => ("TypeScript source, ASCII text", "text/typescript"),
-        "jsx" => ("JSX source, ASCII text", "text/jsx"),
-        "tsx" => ("TSX source, ASCII text", "text/tsx"),
-        "go" => ("Go source, ASCII text", "text/x-go"),
-        "rb" => ("Ruby source, ASCII text", "text/x-ruby"),
-        "php" => ("PHP source, ASCII text", "text/x-php"),
-        "cs" => ("C# source, ASCII text", "text/x-csharp"),
-        "swift" => ("Swift source, ASCII text", "text/x-swift"),
-        "kt" | "kts" => ("Kotlin source, ASCII text", "text/x-kotlin"),
-        "scala" => ("Scala source, ASCII text", "text/x-scala"),
-        "lua" => ("Lua source, ASCII text", "text/x-lua"),
-        "pl" => ("Perl source, ASCII text", "text/x-perl"),
-        "r" => ("R source, ASCII text", "text/x-r"),
-        "sh" => ("Bourne-Again shell script, ASCII text executable", "text/x-shellscript"),
-        "bash" => ("Bash script, ASCII text executable", "text/x-shellscript"),
-        "zsh" => ("Zsh script, ASCII text executable", "text/x-shellscript"),
-        "fish" => ("Fish shell script, ASCII text", "text/x-fish"),
-        "ps1" | "psm1" => ("PowerShell script, ASCII text", "text/x-powershell"),
-        "bat" | "cmd" => ("DOS batch file, ASCII text", "text/x-msdos-batch"),
-        "vbs" => ("VBScript, ASCII text", "text/vbscript"),
-        "sql" => ("SQL source, ASCII text", "text/x-sql"),
-        "hs" => ("Haskell source, ASCII text", "text/x-haskell"),
-        "ml" => ("OCaml source, ASCII text", "text/x-ocaml"),
-        "erl" => ("Erlang source, ASCII text", "text/x-erlang"),
-        "ex" | "exs" => ("Elixir source, ASCII text", "text/x-elixir"),
-        "dart" => ("Dart source, ASCII text", "text/x-dart"),
-        "zig" => ("Zig source, ASCII text", "text/x-zig"),
-        "nim" => ("Nim source, ASCII text", "text/x-nim"),
-        "v" => ("V source, ASCII text", "text/x-v"),
-        "asm" | "s" => ("Assembler source, ASCII text", "text/x-asm"),
-        "toml" => ("TOML document, ASCII text", "text/x-toml"),
-        "yaml" | "yml" => ("YAML document, ASCII text", "text/yaml"),
-        "json" => ("JSON data, ASCII text", "application/json"),
-        "jsonl" => ("JSON Lines data, ASCII text", "application/jsonl"),
-        "xml" => ("XML document, ASCII text", "text/xml"),
-        "html" | "htm" => ("HTML document, ASCII text", "text/html"),
-        "css" => ("CSS stylesheet, ASCII text", "text/css"),
-        "scss" => ("SCSS stylesheet, ASCII text", "text/x-scss"),
-        "less" => ("LESS stylesheet, ASCII text", "text/x-less"),
-        "md" | "markdown" => ("Markdown document, UTF-8 Unicode text", "text/markdown"),
-        "rst" => ("reStructuredText document, ASCII text", "text/x-rst"),
-        "txt" => ("ASCII text", "text/plain"),
-        "log" => ("ASCII text (log)", "text/plain"),
-        "csv" => ("CSV text", "text/csv"),
-        "tsv" => ("TSV text", "text/tab-separated-values"),
-        "ini" | "cfg" | "conf" => ("INI configuration file, ASCII text", "text/plain"),
-        "makefile" => ("makefile script, ASCII text", "text/x-makefile"),
-        "dockerfile" => ("Dockerfile, ASCII text", "text/x-dockerfile"),
-        "cmake" => ("CMake script, ASCII text", "text/x-cmake"),
-
-        // Data formats
-        "proto" => ("Protocol Buffer definition, ASCII text", "text/x-proto"),
-        "graphql" | "gql" => ("GraphQL schema, ASCII text", "text/x-graphql"),
-        "tf" => ("Terraform configuration, ASCII text", "text/x-terraform"),
-        "dockerignore" | "gitignore" => ("ignore file, ASCII text", "text/plain"),
-        "properties" => ("Java properties, ASCII text", "text/x-java-properties"),
+    // (description, mime, is_text_type)
+    let (desc, mime, text_type) = match ext.as_str() {
+        // Programming languages - type only, encoding added dynamically
+        "rs" => ("Rust source", "text/rust", true),
+        "c" => ("C source", "text/x-c", true),
+        "h" => ("C header", "text/x-c", true),
+        "cpp" | "cc" | "cxx" => ("C++ source", "text/x-c++", true),
+        "hpp" | "hh" | "hxx" => ("C++ header", "text/x-c++", true),
+        "java" => ("Java source", "text/x-java", true),
+        "py" => ("Python script", "text/x-python", true),
+        "js" => ("JavaScript source", "text/javascript", true),
+        "ts" => ("TypeScript source", "text/typescript", true),
+        "mts" | "cts" => ("TypeScript source", "text/typescript", true),
+        "jsx" => ("JSX source", "text/jsx", true),
+        "tsx" => ("TSX source", "text/tsx", true),
+        "go" => ("Go source", "text/x-go", true),
+        "rb" => ("Ruby source", "text/x-ruby", true),
+        "php" => ("PHP script", "text/x-php", true),
+        "cs" => ("C# source", "text/x-csharp", true),
+        "swift" => ("Swift source", "text/x-swift", true),
+        "kt" | "kts" => ("Kotlin source", "text/x-kotlin", true),
+        "scala" => ("Scala source", "text/x-scala", true),
+        "lua" => ("Lua source", "text/x-lua", true),
+        "pl" => ("Perl script", "text/x-perl", true),
+        "r" => ("R source", "text/x-r", true),
+        "sh" => ("Bourne-Again shell script", "text/x-shellscript", true),
+        "bash" => ("Bourne-Again shell script", "text/x-shellscript", true),
+        "zsh" => ("Zsh script", "text/x-shellscript", true),
+        "fish" => ("Fish shell script", "text/x-fish", true),
+        "ps1" | "psm1" => ("PowerShell script", "text/x-powershell", true),
+        "bat" | "cmd" => ("DOS batch file", "text/x-msdos-batch", true),
+        "vbs" => ("VBScript", "text/vbscript", true),
+        "sql" => ("SQL source", "text/x-sql", true),
+        "hs" => ("Haskell source", "text/x-haskell", true),
+        "erl" => ("Erlang source", "text/x-erlang", true),
+        "ex" | "exs" => ("Elixir source", "text/x-elixir", true),
+        "dart" => ("Dart source", "text/x-dart", true),
+        "zig" => ("Zig source", "text/x-zig", true),
+        "nim" => ("Nim source", "text/x-nim", true),
+        "asm" | "s" => ("Assembler source", "text/x-asm", true),
+        "toml" => ("TOML document", "text/x-toml", true),
+        "yaml" | "yml" => ("YAML document", "text/yaml", true),
+        "json" => ("JSON data", "application/json", true),
+        "jsonl" => ("JSON Lines data", "application/jsonl", true),
+        "xml" => ("XML document", "text/xml", true),
+        "html" | "htm" => ("HTML document", "text/html", true),
+        "css" => ("CSS stylesheet", "text/css", true),
+        "scss" => ("SCSS stylesheet", "text/x-scss", true),
+        "less" => ("LESS stylesheet", "text/x-less", true),
+        "md" | "markdown" => ("Markdown document", "text/markdown", true),
+        "rst" => ("reStructuredText document", "text/x-rst", true),
+        "txt" => ("", "text/plain", true), // plain text, just show encoding
+        "log" => ("", "text/plain", true),
+        "csv" => ("CSV text", "text/csv", true),
+        "tsv" => ("TSV text", "text/tab-separated-values", true),
+        "ini" | "cfg" | "conf" => ("INI configuration file", "text/plain", true),
+        "makefile" => ("makefile script", "text/x-makefile", true),
+        "dockerfile" => ("Dockerfile", "text/x-dockerfile", true),
+        "cmake" => ("CMake script", "text/x-cmake", true),
+        "proto" => ("Protocol Buffer definition", "text/x-proto", true),
+        "graphql" | "gql" => ("GraphQL schema", "text/x-graphql", true),
+        "tf" => ("Terraform configuration", "text/x-terraform", true),
+        "dockerignore" | "gitignore" => ("ignore file", "text/plain", true),
+        "properties" => ("Java properties", "text/x-java-properties", true),
 
         // Common binary formats by extension
-        "exe" => ("PE32 executable (Windows)", "application/x-dosexec"),
-        "dll" => ("PE32 DLL (Windows)", "application/x-dosexec"),
-        "so" => ("ELF shared object", "application/x-elf"),
-        "dylib" => ("Mach-O dynamic library", "application/x-mach-binary"),
-        "a" => ("ar archive (static library)", "application/x-archive"),
-        "o" => ("ELF relocatable object", "application/x-elf"),
-        "lib" => ("COFF static library", "application/x-archive"),
-        "obj" => ("COFF object file", "application/x-coff"),
+        "exe" => ("PE32 executable (Windows)", "application/x-dosexec", false),
+        "dll" => ("PE32 DLL (Windows)", "application/x-dosexec", false),
+        "so" => ("ELF shared object", "application/x-elf", false),
+        "dylib" => ("Mach-O dynamic library", "application/x-mach-binary", false),
+        "a" => ("ar archive (static library)", "application/x-archive", false),
+        "o" => ("ELF relocatable object", "application/x-elf", false),
+        "lib" => ("COFF static library", "application/x-archive", false),
+        "obj" => ("COFF object file", "application/x-coff", false),
 
-        // Documents
-        "docx" => ("Microsoft Word 2007+ document", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"),
-        "xlsx" => ("Microsoft Excel 2007+ spreadsheet", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"),
-        "pptx" => ("Microsoft PowerPoint 2007+ presentation", "application/vnd.openxmlformats-officedocument.presentationml.presentation"),
-        "doc" => ("Microsoft Word document", "application/msword"),
-        "xls" => ("Microsoft Excel spreadsheet", "application/vnd.ms-excel"),
-        "ppt" => ("Microsoft PowerPoint presentation", "application/vnd.ms-powerpoint"),
-        "odt" => ("OpenDocument text", "application/vnd.oasis.opendocument.text"),
-        "ods" => ("OpenDocument spreadsheet", "application/vnd.oasis.opendocument.spreadsheet"),
-        "odp" => ("OpenDocument presentation", "application/vnd.oasis.opendocument.presentation"),
-        "rtf" => ("Rich Text Format data", "application/rtf"),
-        "epub" => ("EPUB document", "application/epub+zip"),
-        "mobi" => ("Mobipocket eBook", "application/x-mobipocket-ebook"),
+        // Documents (binary)
+        "docx" => ("Microsoft Word 2007+ document", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", false),
+        "xlsx" => ("Microsoft Excel 2007+ spreadsheet", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", false),
+        "pptx" => ("Microsoft PowerPoint 2007+ presentation", "application/vnd.openxmlformats-officedocument.presentationml.presentation", false),
+        "doc" => ("Microsoft Word document", "application/msword", false),
+        "xls" => ("Microsoft Excel spreadsheet", "application/vnd.ms-excel", false),
+        "ppt" => ("Microsoft PowerPoint presentation", "application/vnd.ms-powerpoint", false),
+        "odt" => ("OpenDocument text", "application/vnd.oasis.opendocument.text", false),
+        "ods" => ("OpenDocument spreadsheet", "application/vnd.oasis.opendocument.spreadsheet", false),
+        "odp" => ("OpenDocument presentation", "application/vnd.oasis.opendocument.presentation", false),
+        "rtf" => ("Rich Text Format data", "application/rtf", false),
+        "epub" => ("EPUB document", "application/epub+zip", false),
+        "mobi" => ("Mobipocket eBook", "application/x-mobipocket-ebook", false),
 
         // Images
-        "png" => ("PNG image data", "image/png"),
-        "jpg" | "jpeg" => ("JPEG image data", "image/jpeg"),
-        "gif" => ("GIF image data", "image/gif"),
-        "bmp" => ("BMP image data", "image/bmp"),
-        "ico" => ("ICO image data", "image/x-icon"),
-        "svg" => ("SVG image data", "image/svg+xml"),
-        "webp" => ("WebP image data", "image/webp"),
-        "tiff" | "tif" => ("TIFF image data", "image/tiff"),
-        "psd" => ("Adobe Photoshop image", "image/vnd.adobe.photoshop"),
-        "raw" | "cr2" | "nef" | "orf" | "arw" => ("RAW image data", "image/x-raw"),
-        "heic" | "heif" => ("HEIF image data", "image/heif"),
-        "avif" => ("AVIF image data", "image/avif"),
+        "png" => ("PNG image data", "image/png", false),
+        "jpg" | "jpeg" => ("JPEG image data", "image/jpeg", false),
+        "gif" => ("GIF image data", "image/gif", false),
+        "bmp" => ("BMP image data", "image/bmp", false),
+        "ico" => ("ICO image data", "image/x-icon", false),
+        "svg" => ("SVG image data", "image/svg+xml", true),
+        "webp" => ("WebP image data", "image/webp", false),
+        "tiff" | "tif" => ("TIFF image data", "image/tiff", false),
+        "psd" => ("Adobe Photoshop image", "image/vnd.adobe.photoshop", false),
+        "raw" | "cr2" | "nef" | "orf" | "arw" => ("RAW image data", "image/x-raw", false),
+        "heic" | "heif" => ("HEIF image data", "image/heif", false),
+        "avif" => ("AVIF image data", "image/avif", false),
 
         // Audio
-        "mp3" => ("MP3 audio data", "audio/mpeg"),
-        "wav" => ("WAVE audio data", "audio/wav"),
-        "flac" => ("FLAC audio data", "audio/flac"),
-        "aac" => ("AAC audio data", "audio/aac"),
-        "ogg" => ("Ogg audio data", "audio/ogg"),
-        "wma" => ("Windows Media Audio", "audio/x-ms-wma"),
-        "m4a" => ("M4A audio data", "audio/mp4"),
-        "opus" => ("Opus audio data", "audio/opus"),
-        "mid" | "midi" => ("MIDI audio data", "audio/midi"),
-        "ape" => ("Monkey's Audio (APE)", "audio/x-ape"),
+        "mp3" => ("MP3 audio data", "audio/mpeg", false),
+        "wav" => ("WAVE audio data", "audio/wav", false),
+        "flac" => ("FLAC audio data", "audio/flac", false),
+        "aac" => ("AAC audio data", "audio/aac", false),
+        "ogg" => ("Ogg audio data", "audio/ogg", false),
+        "wma" => ("Windows Media Audio", "audio/x-ms-wma", false),
+        "m4a" => ("M4A audio data", "audio/mp4", false),
+        "opus" => ("Opus audio data", "audio/opus", false),
+        "mid" | "midi" => ("MIDI audio data", "audio/midi", false),
+        "ape" => ("Monkey's Audio (APE)", "audio/x-ape", false),
 
         // Video
-        "mp4" => ("MP4 video data", "video/mp4"),
-        "avi" => ("AVI video data", "video/avi"),
-        "mkv" => ("Matroska video data", "video/x-matroska"),
-        "webm" => ("WebM video data", "video/webm"),
-        "mov" => ("QuickTime movie", "video/quicktime"),
-        "wmv" => ("Windows Media Video", "video/x-ms-wmv"),
-        "flv" => ("Flash video data", "video/x-flv"),
-        "mpeg" | "mpg" => ("MPEG video data", "video/mpeg"),
-        "3gp" => ("3GPP multimedia", "video/3gpp"),
-        "m2ts" => ("MPEG transport stream", "video/mp2t"),
+        "mp4" => ("MP4 video data", "video/mp4", false),
+        "avi" => ("AVI video data", "video/avi", false),
+        "mkv" => ("Matroska video data", "video/x-matroska", false),
+        "webm" => ("WebM video data", "video/webm", false),
+        "mov" => ("QuickTime movie", "video/quicktime", false),
+        "wmv" => ("Windows Media Video", "video/x-ms-wmv", false),
+        "flv" => ("Flash video data", "video/x-flv", false),
+        "mpeg" | "mpg" => ("MPEG video data", "video/mpeg", false),
+        "3gp" => ("3GPP multimedia", "video/3gpp", false),
+        "m2ts" => ("MPEG transport stream", "video/mp2t", false),
 
         // Archives
-        "zip" => ("Zip archive data", "application/zip"),
-        "gz" | "gzip" => ("gzip compressed data", "application/gzip"),
-        "bz2" => ("bzip2 compressed data", "application/x-bzip2"),
-        "xz" => ("XZ compressed data", "application/x-xz"),
-        "lzma" => ("LZMA compressed data", "application/x-lzma"),
-        "rar" => ("RAR archive data", "application/x-rar"),
-        "7z" => ("7-zip archive data", "application/x-7z-compressed"),
-        "tar" => ("tar archive", "application/x-tar"),
-        "zst" => ("Zstandard compressed data", "application/zstd"),
-        "lz4" => ("LZ4 compressed data", "application/x-lz4"),
-        "cab" => ("Microsoft Cabinet archive", "application/vnd.ms-cab-compressed"),
+        "zip" => ("Zip archive data", "application/zip", false),
+        "gz" | "gzip" => ("gzip compressed data", "application/gzip", false),
+        "bz2" => ("bzip2 compressed data", "application/x-bzip2", false),
+        "xz" => ("XZ compressed data", "application/x-xz", false),
+        "lzma" => ("LZMA compressed data", "application/x-lzma", false),
+        "rar" => ("RAR archive data", "application/x-rar", false),
+        "7z" => ("7-zip archive data", "application/x-7z-compressed", false),
+        "tar" => ("tar archive", "application/x-tar", false),
+        "zst" => ("Zstandard compressed data", "application/zstd", false),
+        "lz4" => ("LZ4 compressed data", "application/x-lz4", false),
+        "cab" => ("Microsoft Cabinet archive", "application/vnd.ms-cab-compressed", false),
 
         // Fonts
-        "ttf" => ("TrueType font data", "font/ttf"),
-        "otf" => ("OpenType font data", "font/otf"),
-        "woff" => ("WOFF font data", "font/woff"),
-        "woff2" => ("WOFF2 font data", "font/woff2"),
-        "eot" => ("Embedded OpenType font", "application/vnd.ms-fontobject"),
+        "ttf" => ("TrueType font data", "font/ttf", false),
+        "otf" => ("OpenType font data", "font/otf", false),
+        "woff" => ("WOFF font data", "font/woff", false),
+        "woff2" => ("WOFF2 font data", "font/woff2", false),
+        "eot" => ("Embedded OpenType font", "application/vnd.ms-fontobject", false),
 
         // Other
-        "pdf" => ("PDF document", "application/pdf"),
-        "ps" => ("PostScript document", "application/postscript"),
-        "torrent" => ("BitTorrent torrent file", "application/x-bittorrent"),
-        "iso" => ("ISO 9660 disk image", "application/x-iso9660-image"),
-        "img" => ("disk image", "application/octet-stream"),
-        "swap" => ("swap file", "application/octet-stream"),
+        "pdf" => ("PDF document", "application/pdf", false),
+        "ps" => ("PostScript document", "application/postscript", false),
+        "torrent" => ("BitTorrent torrent file", "application/x-bittorrent", false),
+        "iso" => ("ISO 9660 disk image", "application/x-iso9660-image", false),
+        "img" => ("disk image", "application/octet-stream", false),
+        "swap" => ("swap file", "application/octet-stream", false),
 
         _ => return None,
     };
     Some(MagicMatch {
         description: desc.to_string(),
         mime_type: mime.to_string(),
+        text_type,
     })
 }

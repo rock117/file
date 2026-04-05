@@ -10,3 +10,5 @@ path = "src/main.rs"
 [dependencies]
 clap = { version = "4", features = ["derive"] }
 encoding_rs = "0.8"
+flate2 = "1"
+filetime = "0.2"

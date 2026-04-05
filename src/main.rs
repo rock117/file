@@ -13,13 +13,21 @@ struct Args {
     /// Files to examine
     files: Vec<String>,
 
-    /// Brief mode: show MIME type only
-    #[arg(short = 'i', long = "mime-type")]
+    /// Output MIME type string (e.g. 'text/plain; charset=us-ascii')
+    #[arg(short = 'i', long = "mime")]
+    mime: bool,
+
+    /// Output only the MIME type
+    #[arg(long = "mime-type")]
     mime_type: bool,
 
-    /// Output MIME encoding
-    #[arg(short = 'I', long = "mime-encoding")]
+    /// Output only the MIME encoding
+    #[arg(long = "mime-encoding")]
     mime_encoding: bool,
+
+    /// Output a slash-separated list of valid extensions
+    #[arg(long = "extension")]
+    extension: bool,
 
     /// Don't follow symbolic links
     #[arg(short = 'h', long = "no-dereference")]
@@ -33,16 +41,16 @@ struct Args {
     #[arg(short = 'f', long = "files-from")]
     files_from: Option<String>,
 
-    /// Read from stdin as well as named files
+    /// Read special files (block/char devices)
     #[arg(short = 's', long = "special-files")]
     special_files: bool,
 
     /// Recursive directory traversal
-    #[arg(short = 'r', long = "recursive")]
+    #[arg(long = "recursive")]
     recursive: bool,
 
-    /// Output debug information
-    #[arg(short = 'd', long = "debug")]
+    /// Output debug information to stderr
+    #[arg(short = 'd')]
     debug: bool,
 
     /// Separator between filename and description
@@ -53,13 +61,61 @@ struct Args {
     #[arg(short = 'b', long = "brief")]
     brief: bool,
 
-    /// Verbose mode
-    #[arg(short = 'v', long = "verbose")]
-    verbose: bool,
+    /// Don't pad filenames
+    #[arg(short = 'N', long = "no-pad")]
+    no_pad: bool,
+
+    /// Flush stdout after each file
+    #[arg(short = 'n', long = "no-buffer")]
+    no_buffer: bool,
+
+    /// On filesystem errors, issue error and exit (instead of continuing)
+    #[arg(short = 'E')]
+    exit_on_error: bool,
+
+    /// Don't stop at first match, keep going
+    #[arg(short = 'k', long = "keep-going")]
+    keep_going: bool,
+
+    /// Don't translate unprintable characters to \ooo
+    #[arg(short = 'r', long = "raw")]
+    raw: bool,
+
+    /// Preserve access time of files
+    #[arg(short = 'p', long = "preserve-date")]
+    preserve_date: bool,
+
+    /// Look inside compressed files
+    #[arg(short = 'z', long = "uncompress")]
+    uncompress: bool,
+
+    /// Look inside compressed files, report only contents
+    #[arg(short = 'Z', long = "uncompress-noreport")]
+    uncompress_noreport: bool,
+
+    /// Exclude the named test (apptype, ascii, encoding, compress, elf, json, soft, tar, text, tokens)
+    #[arg(short = 'e', long = "exclude", value_name = "TESTNAME")]
+    exclude: Vec<String>,
+
+    /// Output a null character after filename (for use with xargs -0)
+    #[arg(short = '0', long = "print0")]
+    print0: bool,
+
+    /// Set parameter limits (name=value, e.g. bytes=1M, elf_phnum=2K)
+    #[arg(short = 'P', long = "parameter", value_name = "NAME=VALUE")]
+    parameter: Vec<String>,
 }
 
 fn main() {
     let args = Args::parse();
+
+    // Parse parameters
+    for p in &args.parameter {
+        if !p.contains('=') {
+            eprintln!("file: invalid parameter '{}': expected name=value", p);
+            std::process::exit(1);
+        }
+    }
 
     let mut files = args.files.clone();
 
@@ -96,26 +152,47 @@ fn main() {
         if args.recursive && path.is_dir() {
             if !process_recursive(&path, &args) {
                 had_error = true;
+                if args.exit_on_error {
+                    std::process::exit(1);
+                }
             }
         } else {
+            // Preserve access time if requested
+            let atime: Option<std::time::SystemTime> = if args.preserve_date {
+                std::fs::metadata(&path).ok().and_then(|m| m.accessed().ok())
+            } else {
+                None
+            };
+
             let result = if args.dereference {
                 let real_path = match std::fs::canonicalize(&path) {
                     Ok(p) => p,
                     Err(e) => {
-                        eprintln!("file: cannot open '{}': {}", file_arg, e);
+                        if args.exit_on_error {
+                            eprintln!("file: cannot open '{}': {}", file_arg, e);
+                            std::process::exit(1);
+                        }
                         had_error = true;
                         continue;
                     }
                 };
-                analyzer::analyze_file(&real_path)
+                analyzer::analyze_file_opts(&real_path, &args)
             } else {
-                analyzer::analyze_file(&path)
+                analyzer::analyze_file_opts(&path, &args)
             };
+
+            // Restore access time
+            if let Some(at) = atime {
+                let _ = filetime::set_file_atime(&path, filetime::FileTime::from_system_time(at));
+            }
 
             if result.description.starts_with("cannot open")
                 || result.description.starts_with("cannot read")
             {
                 had_error = true;
+                if args.exit_on_error {
+                    std::process::exit(1);
+                }
             }
             print_result(&result, &args);
         }
@@ -153,7 +230,7 @@ fn process_recursive(dir: &std::path::Path, args: &Args) -> bool {
                 all_ok = false;
             }
         } else {
-            let result = analyzer::analyze_file(&path);
+            let result = analyzer::analyze_file_opts(&path, args);
             if result.description.starts_with("cannot open")
                 || result.description.starts_with("cannot read")
             {
@@ -166,19 +243,92 @@ fn process_recursive(dir: &std::path::Path, args: &Args) -> bool {
 }
 
 fn print_result(result: &analyzer::FileResult, args: &Args) {
-    if args.mime_type || args.mime_encoding {
+    // --extension mode
+    if args.extension {
+        let ext = result.extensions.as_deref().unwrap_or("???");
+        if args.brief {
+            println!("{}", ext);
+        } else {
+            print!("{}{}{}", result.path, args.separator, ext);
+            if args.print0 {
+                print!("\0");
+            }
+            println!();
+        }
+        maybe_flush(args);
+        return;
+    }
+
+    // --mime mode: output "type/subtype; charset=encoding"
+    if args.mime {
+        let mime = result.mime_type.as_deref().unwrap_or("application/octet-stream");
+        let charset = result.charset.as_deref().unwrap_or("binary");
+        let output = if charset == "binary" {
+            mime.to_string()
+        } else {
+            format!("{}; charset={}", mime, charset)
+        };
+        if args.brief {
+            println!("{}", output);
+        } else {
+            print!("{}{}{}", result.path, args.separator, output);
+            if args.print0 {
+                print!("\0");
+            }
+            println!();
+        }
+        maybe_flush(args);
+        return;
+    }
+
+    // --mime-type
+    if args.mime_type {
         let mime = result.mime_type.as_deref().unwrap_or("application/octet-stream");
         if args.brief {
             println!("{}", mime);
         } else {
-            println!("{}{}{}", result.path, args.separator, mime);
+            print!("{}{}{}", result.path, args.separator, mime);
+            if args.print0 {
+                print!("\0");
+            }
+            println!();
         }
+        maybe_flush(args);
         return;
     }
 
+    // --mime-encoding
+    if args.mime_encoding {
+        let charset = result.charset.as_deref().unwrap_or("binary");
+        if args.brief {
+            println!("{}", charset);
+        } else {
+            print!("{}{}{}", result.path, args.separator, charset);
+            if args.print0 {
+                print!("\0");
+            }
+            println!();
+        }
+        maybe_flush(args);
+        return;
+    }
+
+    // Normal output
     if args.brief {
         println!("{}", result.description);
     } else {
-        println!("{}{}{}", result.path, args.separator, result.description);
+        print!("{}{}{}", result.path, args.separator, result.description);
+        if args.print0 {
+            print!("\0");
+        }
+        println!();
+    }
+    maybe_flush(args);
+}
+
+fn maybe_flush(args: &Args) {
+    if args.no_buffer {
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
     }
 }

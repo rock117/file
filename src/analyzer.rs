@@ -41,10 +41,18 @@ pub fn analyze_file_opts(path: &Path, args: &crate::Args) -> FileResult {
         let target = fs::read_link(path)
             .map(|t| t.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
+        // Follow symlink to get MIME type of target
+        let target_mime = fs::metadata(path).ok().and_then(|m| {
+            if m.file_type().is_dir() {
+                Some("inode/directory".to_string())
+            } else {
+                None // will be determined by content analysis below if -L
+            }
+        });
         return FileResult {
             path: display_path,
             description: format!("symbolic link to '{}'", target),
-            mime_type: None,
+            mime_type: target_mime,
             charset: None,
             extensions: None,
         };
@@ -54,16 +62,16 @@ pub fn analyze_file_opts(path: &Path, args: &crate::Args) -> FileResult {
     {
         use std::os::unix::fs::FileTypeExt;
         if file_type.is_block_device() {
-            return FileResult { path: display_path, description: "block special".to_string(), mime_type: None, charset: None, extensions: None };
+            return FileResult { path: display_path, description: "block special".to_string(), mime_type: Some("inode/blockdevice".to_string()), charset: None, extensions: None };
         }
         if file_type.is_char_device() {
-            return FileResult { path: display_path, description: "character special".to_string(), mime_type: None, charset: None, extensions: None };
+            return FileResult { path: display_path, description: "character special".to_string(), mime_type: Some("inode/chardevice".to_string()), charset: None, extensions: None };
         }
         if file_type.is_fifo() {
-            return FileResult { path: display_path, description: "fifo (named pipe)".to_string(), mime_type: None, charset: None, extensions: None };
+            return FileResult { path: display_path, description: "fifo (named pipe)".to_string(), mime_type: Some("inode/fifo".to_string()), charset: None, extensions: None };
         }
         if file_type.is_socket() {
-            return FileResult { path: display_path, description: "socket".to_string(), mime_type: None, charset: None, extensions: None };
+            return FileResult { path: display_path, description: "socket".to_string(), mime_type: Some("inode/socket".to_string()), charset: None, extensions: None };
         }
     }
 
@@ -71,7 +79,7 @@ pub fn analyze_file_opts(path: &Path, args: &crate::Args) -> FileResult {
         return FileResult {
             path: display_path,
             description: "directory".to_string(),
-            mime_type: None,
+            mime_type: Some("inode/directory".to_string()),
             charset: None,
             extensions: None,
         };
@@ -81,8 +89,8 @@ pub fn analyze_file_opts(path: &Path, args: &crate::Args) -> FileResult {
         return FileResult {
             path: display_path,
             description: "empty".to_string(),
-            mime_type: None,
-            charset: Some("binary".to_string()),
+            mime_type: Some("application/x-empty".to_string()),
+            charset: None,
             extensions: None,
         };
     }
@@ -228,11 +236,11 @@ pub fn analyze_file(path: &Path) -> FileResult {
     }
 
     if file_type.is_dir() {
-        return FileResult { path: display_path, description: "directory".to_string(), mime_type: None, charset: None, extensions: None };
+        return FileResult { path: display_path, description: "directory".to_string(), mime_type: Some("inode/directory".to_string()), charset: None, extensions: None };
     }
 
     if metadata.len() == 0 {
-        return FileResult { path: display_path, description: "empty".to_string(), mime_type: None, charset: None, extensions: None };
+        return FileResult { path: display_path, description: "empty".to_string(), mime_type: Some("application/x-empty".to_string()), charset: None, extensions: None };
     }
 
     let data = match read_file_header(path) {

@@ -4,11 +4,11 @@ mod analyzer;
 
 use std::path::PathBuf;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 
 /// Determine file type - a Windows port of the Linux `file` command.
 #[derive(Parser, Debug)]
-#[command(name = "file", version, about = "Determine type of FILEs")]
+#[command(name = "file", version, about = "Determine type of FILEs", disable_help_flag = true)]
 struct Args {
     /// Files to examine
     files: Vec<String>,
@@ -104,10 +104,21 @@ struct Args {
     /// Set parameter limits (name=value, e.g. bytes=1M, elf_phnum=2K)
     #[arg(short = 'P', long = "parameter", value_name = "NAME=VALUE")]
     parameter: Vec<String>,
+
+    /// Print help information
+    #[arg(long = "help")]
+    help: bool,
 }
 
 fn main() {
     let args = Args::parse();
+
+    if args.help {
+        let mut cmd = Args::command();
+        let _ = cmd.print_help();
+        println!();
+        return;
+    }
 
     // Parse parameters
     for p in &args.parameter {

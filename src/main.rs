@@ -117,9 +117,39 @@ fn main() {
         }
     }
 
+    // Handle -f - (read filenames from stdin, streaming)
+    if args.files_from.as_deref() == Some("-") {
+        use std::io::{BufRead, Write};
+        let stdin = std::io::stdin();
+        let stdout = std::io::stdout();
+        let mut stdout_lock = stdout.lock();
+        for line in stdin.lock().lines() {
+            match line {
+                Ok(l) => {
+                    let trimmed = l.trim();
+                    if trimmed.is_empty() {
+                        continue;
+                    }
+                    let path = PathBuf::from(trimmed);
+                    let result = if args.dereference {
+                        std::fs::canonicalize(&path)
+                            .map(|p| analyzer::analyze_file_opts(&p, &args))
+                            .unwrap_or_else(|_| analyzer::analyze_file_opts(&path, &args))
+                    } else {
+                        analyzer::analyze_file_opts(&path, &args)
+                    };
+                    print_result(&result, &args);
+                    let _ = stdout_lock.flush();
+                }
+                Err(_) => break,
+            }
+        }
+        return;
+    }
+
     let mut files = args.files.clone();
 
-    // Read file list from --files-from
+    // Read file list from --files-from (file path, not stdin)
     if let Some(ref from_file) = args.files_from {
         match std::fs::read_to_string(from_file) {
             Ok(content) => {

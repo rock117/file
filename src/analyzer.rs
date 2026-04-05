@@ -17,21 +17,76 @@ pub struct FileResult {
     pub extensions: Option<String>,
 }
 
+impl FileResult {
+    fn error(path: impl Into<String>, msg: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            description: msg.into(),
+            mime_type: None,
+            charset: None,
+            extensions: None,
+        }
+    }
+
+    fn special(path: impl Into<String>, desc: impl Into<String>, mime: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            description: desc.into(),
+            mime_type: Some(mime.into()),
+            charset: None,
+            extensions: None,
+        }
+    }
+
+    fn unknown_data(path: impl Into<String>) -> Self {
+        Self {
+            path: path.into(),
+            description: "data".to_string(),
+            mime_type: Some("application/octet-stream".to_string()),
+            charset: Some("binary".to_string()),
+            extensions: None,
+        }
+    }
+
+    fn from_magic(path: impl Into<String>, desc: String, mime: String, is_text: bool) -> Self {
+        Self {
+            path: path.into(),
+            description: desc,
+            charset: Some(if is_text { "us-ascii".to_string() } else { "binary".to_string() }),
+            extensions: get_extensions_for_mime(&mime),
+            mime_type: Some(mime),
+        }
+    }
+}
+
 /// Analyze file with CLI options context
 pub fn analyze_file_opts(path: &Path, args: &crate::Args) -> FileResult {
     let display_path = path.to_string_lossy().to_string();
 
+    // Filesystem-level classification
+    if let Some(result) = classify_by_filesystem(path, &display_path) {
+        return result;
+    }
+
+    // Read file header
+    let data = match read_file_header(path) {
+        Some(d) => d,
+        None => return FileResult::error(display_path, format!("cannot read: {}", path.display())),
+    };
+
+    let effective_data = get_effective_data(&data, args);
+    analyze_content(path, &display_path, &*effective_data, args)
+}
+
+/// Filesystem-level checks: symlinks, special files, directories, empty files
+fn classify_by_filesystem(path: &Path, display_path: &str) -> Option<FileResult> {
     let metadata = match fs::symlink_metadata(path) {
         Ok(m) => m,
         Err(e) => {
-            let dp = path.display();
-            return FileResult {
-                path: dp.to_string(),
-                description: format!("cannot open: {} ({})", dp, e),
-                mime_type: None,
-                charset: None,
-                extensions: None,
-            };
+            return Some(FileResult::error(
+                display_path,
+                format!("cannot open: {} ({})", display_path, e),
+            ));
         }
     };
 
@@ -41,305 +96,147 @@ pub fn analyze_file_opts(path: &Path, args: &crate::Args) -> FileResult {
         let target = fs::read_link(path)
             .map(|t| t.to_string_lossy().to_string())
             .unwrap_or_else(|_| "unknown".to_string());
-        // Follow symlink to get MIME type of target
         let target_mime = fs::metadata(path).ok().and_then(|m| {
             if m.file_type().is_dir() {
                 Some("inode/directory".to_string())
             } else {
-                None // will be determined by content analysis below if -L
+                None
             }
         });
-        return FileResult {
-            path: display_path,
+        return Some(FileResult {
+            path: display_path.to_string(),
             description: format!("symbolic link to '{}'", target),
             mime_type: target_mime,
             charset: None,
             extensions: None,
-        };
+        });
     }
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::FileTypeExt;
         if file_type.is_block_device() {
-            return FileResult { path: display_path, description: "block special".to_string(), mime_type: Some("inode/blockdevice".to_string()), charset: None, extensions: None };
+            return Some(FileResult::special(display_path, "block special", "inode/blockdevice"));
         }
         if file_type.is_char_device() {
-            return FileResult { path: display_path, description: "character special".to_string(), mime_type: Some("inode/chardevice".to_string()), charset: None, extensions: None };
+            return Some(FileResult::special(display_path, "character special", "inode/chardevice"));
         }
         if file_type.is_fifo() {
-            return FileResult { path: display_path, description: "fifo (named pipe)".to_string(), mime_type: Some("inode/fifo".to_string()), charset: None, extensions: None };
+            return Some(FileResult::special(display_path, "fifo (named pipe)", "inode/fifo"));
         }
         if file_type.is_socket() {
-            return FileResult { path: display_path, description: "socket".to_string(), mime_type: Some("inode/socket".to_string()), charset: None, extensions: None };
+            return Some(FileResult::special(display_path, "socket", "inode/socket"));
         }
     }
 
     if file_type.is_dir() {
-        return FileResult {
-            path: display_path,
-            description: "directory".to_string(),
-            mime_type: Some("inode/directory".to_string()),
-            charset: None,
-            extensions: None,
-        };
+        return Some(FileResult::special(display_path, "directory", "inode/directory"));
     }
 
     if metadata.len() == 0 {
-        return FileResult {
-            path: display_path,
-            description: "empty".to_string(),
-            mime_type: Some("application/x-empty".to_string()),
-            charset: None,
-            extensions: None,
-        };
+        return Some(FileResult::special(display_path, "empty", "application/x-empty"));
     }
 
-    let data = match read_file_header(path) {
-        Some(d) => d,
-        None => {
-            let dp = path.display();
-            return FileResult { path: dp.to_string(), description: format!("cannot read: {}", dp), mime_type: None, charset: None, extensions: None };
-        }
-    };
+    None
+}
 
-    // Try uncompress if -z flag
-    let uncompressed_data;
-    let effective_data = if args.uncompress || args.uncompress_noreport {
-        if let Some(decompressed) = try_decompress(&data) {
-            uncompressed_data = decompressed;
-            &uncompressed_data as &[u8]
-        } else {
-            &data as &[u8]
+/// Get effective data (possibly decompressed) based on CLI flags
+fn get_effective_data<'a>(data: &'a [u8], args: &crate::Args) -> std::borrow::Cow<'a, [u8]> {
+    if args.uncompress || args.uncompress_noreport {
+        if let Some(decompressed) = try_decompress(data) {
+            return std::borrow::Cow::Owned(decompressed);
         }
-    } else {
-        &data as &[u8]
-    };
+    }
+    std::borrow::Cow::Borrowed(data)
+}
 
-    // Try magic number detection
-    if let Some(match_result) = magic::identify_by_magic(effective_data) {
+/// Content-level analysis: magic detection, text analysis, extension fallback
+fn analyze_content(path: &Path, display_path: &str, data: &[u8], args: &crate::Args) -> FileResult {
+    // Magic number detection
+    if let Some(match_result) = magic::identify_by_magic(data) {
         let desc = if args.uncompress && !args.uncompress_noreport {
             format!("{} (compressed)", match_result.description)
         } else {
             match_result.description
         };
-        return FileResult {
-            path: display_path,
-            description: desc,
-            mime_type: Some(match_result.mime_type.clone()),
-            charset: if match_result.mime_type.starts_with("text/") {
-                Some("us-ascii".to_string())
-            } else {
-                Some("binary".to_string())
-            },
-            extensions: get_extensions_for_mime(&match_result.mime_type),
-        };
+        let is_text = match_result.mime_type.starts_with("text/");
+        return FileResult::from_magic(display_path, desc, match_result.mime_type, is_text);
     }
 
-    // Check if it's text
-    if text::is_text(effective_data) {
-        let info = text::analyze_text(effective_data);
-        let charset = detect_charset(&info);
-        let enc_desc = text::format_encoding(&info.encoding, info.with_bom);
-
-        // Try extension-based type identification
-        if let Some(ext_match) = magic::guess_by_extension(path) {
-            if ext_match.text_type {
-                let mut parts = Vec::new();
-                if !ext_match.description.is_empty() {
-                    parts.push(ext_match.description);
-                    parts.push(enc_desc);
-                } else {
-                    parts.push(enc_desc);
-                }
-                append_line_info(&mut parts, &info);
-                return FileResult {
-                    path: display_path,
-                    description: parts.join(", "),
-                    mime_type: Some(ext_match.mime_type.clone()),
-                    charset: Some(charset),
-                    extensions: get_extensions_for_mime(&ext_match.mime_type),
-                };
-            }
-            return FileResult {
-                path: display_path,
-                description: ext_match.description,
-                mime_type: Some(ext_match.mime_type.clone()),
-                charset: Some(charset),
-                extensions: get_extensions_for_mime(&ext_match.mime_type),
-            };
-        }
-
-        // No known extension - use content heuristics
-        let desc = text::format_text_description(&info);
-        let mime = guess_mime_from_text(&info);
-        return FileResult {
-            path: display_path,
-            description: desc,
-            mime_type: mime,
-            charset: Some(charset),
-            extensions: None,
-        };
+    // Text analysis
+    if text::is_text(data) {
+        return analyze_text_content(path, display_path, data);
     }
 
     // Binary: try extension as fallback
     if let Some(match_result) = magic::guess_by_extension(path) {
+        let mime = match_result.mime_type;
         return FileResult {
-            path: display_path,
+            path: display_path.to_string(),
             description: match_result.description,
-            mime_type: Some(match_result.mime_type.clone()),
+            extensions: get_extensions_for_mime(&mime),
+            mime_type: Some(mime),
             charset: Some("binary".to_string()),
-            extensions: get_extensions_for_mime(&match_result.mime_type),
         };
     }
 
-    FileResult {
-        path: display_path,
-        description: "data".to_string(),
-        mime_type: Some("application/octet-stream".to_string()),
-        charset: Some("binary".to_string()),
-        extensions: None,
-    }
+    FileResult::unknown_data(display_path)
 }
 
-/// Legacy analyze_file without CLI context
-pub fn analyze_file(path: &Path) -> FileResult {
-    let display_path = path.to_string_lossy().to_string();
+/// Analyze text file content
+fn analyze_text_content(path: &Path, display_path: &str, data: &[u8]) -> FileResult {
+    let info = text::analyze_text(data);
+    let charset = detect_charset(&info);
+    let enc_desc = text::format_encoding(&info.encoding, info.with_bom);
 
-    let metadata = match fs::symlink_metadata(path) {
-        Ok(m) => m,
-        Err(e) => {
-            let dp = path.display();
-            return FileResult {
-                path: dp.to_string(),
-                description: format!("cannot open: {} ({})", dp, e),
-                mime_type: None,
-                charset: None,
-                extensions: None,
-            };
-        }
-    };
-
-    let file_type = metadata.file_type();
-
-    if file_type.is_symlink() {
-        let target = fs::read_link(path)
-            .map(|t| t.to_string_lossy().to_string())
-            .unwrap_or_else(|_| "unknown".to_string());
-        return FileResult {
-            path: display_path,
-            description: format!("symbolic link to '{}'", target),
-            mime_type: None,
-            charset: None,
-            extensions: None,
-        };
-    }
-
-    if file_type.is_dir() {
-        return FileResult { path: display_path, description: "directory".to_string(), mime_type: Some("inode/directory".to_string()), charset: None, extensions: None };
-    }
-
-    if metadata.len() == 0 {
-        return FileResult { path: display_path, description: "empty".to_string(), mime_type: Some("application/x-empty".to_string()), charset: None, extensions: None };
-    }
-
-    let data = match read_file_header(path) {
-        Some(d) => d,
-        None => {
-            let dp = path.display();
-            return FileResult { path: dp.to_string(), description: format!("cannot read: {}", dp), mime_type: None, charset: None, extensions: None };
-        }
-    };
-
-    if let Some(match_result) = magic::identify_by_magic(&data) {
-        return FileResult {
-            path: display_path,
-            description: match_result.description,
-            mime_type: Some(match_result.mime_type),
-            charset: Some("binary".to_string()),
-            extensions: None,
-        };
-    }
-
-    if text::is_text(&data) {
-        let info = text::analyze_text(&data);
-        let enc_desc = text::format_encoding(&info.encoding, info.with_bom);
-        let charset = detect_charset(&info);
-
-        if let Some(ext_match) = magic::guess_by_extension(path) {
-            if ext_match.text_type {
-                let mut parts = Vec::new();
-                if !ext_match.description.is_empty() {
-                    parts.push(ext_match.description);
-                    parts.push(enc_desc);
-                } else {
-                    parts.push(enc_desc);
-                }
-                append_line_info(&mut parts, &info);
-                return FileResult {
-                    path: display_path,
-                    description: parts.join(", "),
-                    mime_type: Some(ext_match.mime_type),
-                    charset: Some(charset),
-                    extensions: None,
-                };
+    // Try extension-based type identification
+    if let Some(ext_match) = magic::guess_by_extension(path) {
+        let mime = ext_match.mime_type;
+        if ext_match.text_type {
+            let mut parts = Vec::new();
+            if !ext_match.description.is_empty() {
+                parts.push(ext_match.description);
+                parts.push(enc_desc);
+            } else {
+                parts.push(enc_desc);
             }
+            append_line_info(&mut parts, &info);
             return FileResult {
-                path: display_path,
-                description: ext_match.description,
-                mime_type: Some(ext_match.mime_type),
+                path: display_path.to_string(),
+                description: parts.join(", "),
+                extensions: get_extensions_for_mime(&mime),
+                mime_type: Some(mime),
                 charset: Some(charset),
-                extensions: None,
             };
         }
-
-        let desc = text::format_text_description(&info);
-        let mime = guess_mime_from_text(&info);
         return FileResult {
-            path: display_path,
-            description: desc,
-            mime_type: mime,
+            path: display_path.to_string(),
+            description: ext_match.description,
+            extensions: get_extensions_for_mime(&mime),
+            mime_type: Some(mime),
             charset: Some(charset),
-            extensions: None,
         };
     }
 
-    if let Some(match_result) = magic::guess_by_extension(path) {
-        return FileResult {
-            path: display_path,
-            description: match_result.description,
-            mime_type: Some(match_result.mime_type),
-            charset: Some("binary".to_string()),
-            extensions: None,
-        };
-    }
-
+    // No known extension - use content heuristics
+    let desc = text::format_text_description(&info);
+    let mime = guess_mime_from_text(&info);
     FileResult {
-        path: display_path,
-        description: "data".to_string(),
-        mime_type: Some("application/octet-stream".to_string()),
-        charset: Some("binary".to_string()),
+        path: display_path.to_string(),
+        description: desc,
+        mime_type: mime,
+        charset: Some(charset),
         extensions: None,
     }
 }
 
 fn detect_charset(info: &text::TextInfo) -> String {
-    match info.encoding.as_str() {
-        "ascii" => "us-ascii".to_string(),
-        "utf-8" => "utf-8".to_string(),
-        "utf-16le" => "utf-16le".to_string(),
-        "utf-16be" => "utf-16be".to_string(),
-        _ => "unknown-8bit".to_string(),
-    }
+    info.encoding.charset_name().to_string()
 }
 
 fn append_line_info(parts: &mut Vec<String>, info: &text::TextInfo) {
-    match info.line_ending.as_str() {
-        "CRLF" => parts.push("with CRLF line terminators".to_string()),
-        "CR" => parts.push("with CR line terminators".to_string()),
-        "no line terminators" => parts.push("with no line terminators".to_string()),
-        "mixed" => parts.push("with mixed line terminators".to_string()),
-        _ => {}
+    if let Some(desc) = info.line_ending.description() {
+        parts.push(desc.to_string());
     }
     if info.has_long_lines {
         parts.push("with very long lines".to_string());
@@ -363,7 +260,7 @@ fn read_file_header(path: &Path) -> Option<Vec<u8>> {
     }
 }
 
-/// Try to decompress gzip/zlib/bzip2/xz/lz4/zstd data
+/// Try to decompress gzip/zlib data
 fn try_decompress(data: &[u8]) -> Option<Vec<u8>> {
     if data.len() < 2 {
         return None;
@@ -520,13 +417,12 @@ pub fn analyze_stdin() -> FileResult {
     }
 
     if let Some(match_result) = magic::identify_by_magic(&buf) {
-        return FileResult {
-            path: "/dev/stdin".to_string(),
-            description: match_result.description,
-            mime_type: Some(match_result.mime_type),
-            charset: Some("binary".to_string()),
-            extensions: None,
-        };
+        return FileResult::from_magic(
+            "/dev/stdin",
+            match_result.description,
+            match_result.mime_type,
+            false,
+        );
     }
 
     if text::is_text(&buf) {
@@ -543,11 +439,5 @@ pub fn analyze_stdin() -> FileResult {
         };
     }
 
-    FileResult {
-        path: "/dev/stdin".to_string(),
-        description: "data".to_string(),
-        mime_type: Some("application/octet-stream".to_string()),
-        charset: Some("binary".to_string()),
-        extensions: None,
-    }
+    FileResult::unknown_data("/dev/stdin")
 }

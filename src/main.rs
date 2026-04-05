@@ -110,6 +110,43 @@ struct Args {
     help: bool,
 }
 
+#[derive(Clone, Copy)]
+enum OutputMode {
+    Normal,
+    Mime,
+    MimeType,
+    MimeEncoding,
+    Extension,
+}
+
+impl OutputMode {
+    fn from_args(args: &Args) -> Self {
+        if args.extension { Self::Extension }
+        else if args.mime { Self::Mime }
+        else if args.mime_type { Self::MimeType }
+        else if args.mime_encoding { Self::MimeEncoding }
+        else { Self::Normal }
+    }
+
+    fn format_value(&self, result: &analyzer::FileResult) -> String {
+        match self {
+            Self::Normal => result.description.clone(),
+            Self::Extension => result.extensions.as_deref().unwrap_or("???").to_string(),
+            Self::MimeType => result.mime_type.as_deref().unwrap_or("application/octet-stream").to_string(),
+            Self::MimeEncoding => result.charset.as_deref().unwrap_or("binary").to_string(),
+            Self::Mime => {
+                let mime = result.mime_type.as_deref().unwrap_or("application/octet-stream");
+                let charset = result.charset.as_deref().unwrap_or("binary");
+                if charset == "binary" {
+                    mime.to_string()
+                } else {
+                    format!("{}; charset={}", mime, charset)
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
 
@@ -284,90 +321,18 @@ fn process_recursive(dir: &std::path::Path, args: &Args) -> bool {
 }
 
 fn print_result(result: &analyzer::FileResult, args: &Args) {
-    // --extension mode
-    if args.extension {
-        let ext = result.extensions.as_deref().unwrap_or("???");
-        if args.brief {
-            println!("{}", ext);
-        } else {
-            print!("{}{}{}", result.path, args.separator, ext);
-            if args.print0 {
-                print!("\0");
-            }
-            println!();
-        }
-        maybe_flush(args);
-        return;
-    }
+    let mode = OutputMode::from_args(args);
+    let value = mode.format_value(result);
 
-    // --mime mode: output "type/subtype; charset=encoding"
-    if args.mime {
-        let mime = result.mime_type.as_deref().unwrap_or("application/octet-stream");
-        let charset = result.charset.as_deref().unwrap_or("binary");
-        let output = if charset == "binary" {
-            mime.to_string()
-        } else {
-            format!("{}; charset={}", mime, charset)
-        };
-        if args.brief {
-            println!("{}", output);
-        } else {
-            print!("{}{}{}", result.path, args.separator, output);
-            if args.print0 {
-                print!("\0");
-            }
-            println!();
-        }
-        maybe_flush(args);
-        return;
-    }
-
-    // --mime-type
-    if args.mime_type {
-        let mime = result.mime_type.as_deref().unwrap_or("application/octet-stream");
-        if args.brief {
-            println!("{}", mime);
-        } else {
-            print!("{}{}{}", result.path, args.separator, mime);
-            if args.print0 {
-                print!("\0");
-            }
-            println!();
-        }
-        maybe_flush(args);
-        return;
-    }
-
-    // --mime-encoding
-    if args.mime_encoding {
-        let charset = result.charset.as_deref().unwrap_or("binary");
-        if args.brief {
-            println!("{}", charset);
-        } else {
-            print!("{}{}{}", result.path, args.separator, charset);
-            if args.print0 {
-                print!("\0");
-            }
-            println!();
-        }
-        maybe_flush(args);
-        return;
-    }
-
-    // Normal output
     if args.brief {
-        println!("{}", result.description);
+        println!("{}", value);
     } else {
-        print!("{}{}{}", result.path, args.separator, result.description);
+        print!("{}{}{}", result.path, args.separator, value);
         if args.print0 {
             print!("\0");
         }
         println!();
     }
-    maybe_flush(args);
-}
-
-fn maybe_flush(args: &Args) {
     if args.no_buffer {
         use std::io::Write;
         let _ = std::io::stdout().flush();

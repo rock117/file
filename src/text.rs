@@ -1,13 +1,70 @@
 /// Text file analysis: encoding detection, line ending detection, language heuristics.
 
+/// Detected text encoding
+#[derive(Debug, Clone, PartialEq)]
+pub enum Encoding {
+    Ascii,
+    Utf8,
+    Utf16Le,
+    Utf16Be,
+    Utf32Le,
+    Utf32Be,
+    Other(String),
+}
+
+impl Encoding {
+    /// Standard charset name for MIME output
+    pub fn charset_name(&self) -> &str {
+        match self {
+            Self::Ascii => "us-ascii",
+            Self::Utf8 => "utf-8",
+            Self::Utf16Le => "utf-16le",
+            Self::Utf16Be => "utf-16be",
+            _ => "unknown-8bit",
+        }
+    }
+
+    /// Human-readable encoding name for normal output
+    pub fn display_name(&self, with_bom: bool) -> String {
+        match self {
+            Self::Ascii => "ASCII text".to_string(),
+            Self::Utf8 if with_bom => "UTF-8 Unicode (with BOM) text".to_string(),
+            Self::Utf8 => "UTF-8 Unicode text".to_string(),
+            Self::Utf16Le => "Little-endian UTF-16 Unicode text".to_string(),
+            Self::Utf16Be => "Big-endian UTF-16 Unicode text".to_string(),
+            _ => "Non-ISO extended-ASCII text".to_string(),
+        }
+    }
+}
+
+/// Detected line ending style
+#[derive(Debug, Clone, PartialEq)]
+pub enum LineEnding {
+    Lf,
+    Crlf,
+    Cr,
+    Mixed,
+    None,
+}
+
+impl LineEnding {
+    pub fn description(&self) -> Option<&'static str> {
+        match self {
+            Self::Crlf => Some("with CRLF line terminators"),
+            Self::Cr => Some("with CR line terminators"),
+            Self::Mixed => Some("with mixed line terminators"),
+            Self::None => Some("with no line terminators"),
+            Self::Lf => None,
+        }
+    }
+}
+
 /// Result of text file analysis
 #[derive(Debug)]
 pub struct TextInfo {
-    pub encoding: String,
-    pub line_ending: String,
+    pub encoding: Encoding,
+    pub line_ending: LineEnding,
     pub with_bom: bool,
-    pub line_count: usize,
-    pub word_count: usize,
     pub has_long_lines: bool,
     pub language_hint: Option<String>,
 }
@@ -16,8 +73,6 @@ pub struct TextInfo {
 pub fn analyze_text(data: &[u8]) -> TextInfo {
     let (encoding, text, with_bom) = decode_text(data);
     let line_ending = detect_line_endings(&text);
-    let line_count = text.lines().count().max(1);
-    let word_count = text.split_whitespace().count();
     let has_long_lines = text.lines().any(|line| line.len() > 1000);
     let language_hint = detect_language(&text);
 
@@ -25,48 +80,41 @@ pub fn analyze_text(data: &[u8]) -> TextInfo {
         encoding,
         line_ending,
         with_bom,
-        line_count,
-        word_count,
         has_long_lines,
         language_hint,
     }
 }
 
 /// Decode bytes to string, detecting encoding
-fn decode_text(data: &[u8]) -> (String, String, bool) {
+fn decode_text(data: &[u8]) -> (Encoding, String, bool) {
     // Check for BOM first
     if data.starts_with(&[0xEF, 0xBB, 0xBF]) {
         let text = String::from_utf8_lossy(&data[3..]).to_string();
-        return ("utf-8".to_string(), text, true);
+        return (Encoding::Utf8, text, true);
     }
     if data.starts_with(&[0xFF, 0xFE]) {
-        // UTF-16 LE BOM
         let (cow, _, _) = encoding_rs::UTF_16LE.decode(&data[2..]);
-        return ("utf-16le".to_string(), cow.to_string(), true);
+        return (Encoding::Utf16Le, cow.to_string(), true);
     }
     if data.starts_with(&[0xFE, 0xFF]) {
-        // UTF-16 BE BOM
         let (cow, _, _) = encoding_rs::UTF_16BE.decode(&data[2..]);
-        return ("utf-16be".to_string(), cow.to_string(), true);
+        return (Encoding::Utf16Be, cow.to_string(), true);
     }
     if data.starts_with(&[0xFF, 0xFE, 0x00, 0x00]) {
-        // UTF-32 LE BOM - decode as UTF-16LE as fallback approximation
         let (cow, _, _) = encoding_rs::UTF_16LE.decode(&data[4..]);
-        return ("utf-32le".to_string(), cow.to_string(), true);
+        return (Encoding::Utf32Le, cow.to_string(), true);
     }
     if data.starts_with(&[0x00, 0x00, 0xFE, 0xFF]) {
-        // UTF-32 BE BOM - decode as UTF-16BE as fallback approximation
         let (cow, _, _) = encoding_rs::UTF_16BE.decode(&data[4..]);
-        return ("utf-32be".to_string(), cow.to_string(), true);
+        return (Encoding::Utf32Be, cow.to_string(), true);
     }
 
     // Try UTF-8 first
     match String::from_utf8(data.to_vec()) {
         Ok(s) => {
-            // Check if it's pure ASCII (no bytes > 127)
             let is_ascii = data.iter().all(|&b| b <= 0x7F);
-            let enc = if is_ascii { "ascii" } else { "utf-8" };
-            return (enc.to_string(), s, false);
+            let enc = if is_ascii { Encoding::Ascii } else { Encoding::Utf8 };
+            return (enc, s, false);
         }
         Err(_) => {}
     }
@@ -90,13 +138,13 @@ fn decode_text(data: &[u8]) -> (String, String, bool) {
     for enc in encodings {
         let (cow, encoding_used, had_errors) = enc.decode(data);
         if !had_errors && is_plausible_text(&cow) {
-            return (encoding_used.name().to_string(), cow.to_string(), false);
+            return (Encoding::Other(encoding_used.name().to_string()), cow.to_string(), false);
         }
     }
 
     // Fallback: lossy UTF-8
     let text = String::from_utf8_lossy(data).to_string();
-    ("unknown".to_string(), text, false)
+    (Encoding::Other("unknown".to_string()), text, false)
 }
 
 /// Check if a string looks like plausible human-readable text
@@ -113,19 +161,19 @@ fn is_plausible_text(s: &str) -> bool {
 }
 
 /// Detect line ending style
-fn detect_line_endings(text: &str) -> String {
+fn detect_line_endings(text: &str) -> LineEnding {
     let crlf = text.matches("\r\n").count();
     let lf = text.matches('\n').count() - crlf;
     let cr = text.matches('\r').count() - crlf;
 
     match (crlf, lf, cr) {
-        (0, 0, 0) => "no line terminators".to_string(),
-        (_, _, _) if crlf > lf && crlf > cr => "CRLF".to_string(),
-        (_, _, _) if lf > crlf && lf > cr => "LF".to_string(),
-        (_, _, _) if cr > crlf && cr > lf => "CR".to_string(),
-        (0, _, _) if lf > 0 => "LF".to_string(),
-        (_, 0, _) if crlf > 0 => "CRLF".to_string(),
-        _ => "mixed".to_string(),
+        (0, 0, 0) => LineEnding::None,
+        (_, _, _) if crlf > lf && crlf > cr => LineEnding::Crlf,
+        (_, _, _) if lf > crlf && lf > cr => LineEnding::Lf,
+        (_, _, _) if cr > crlf && cr > lf => LineEnding::Cr,
+        (0, _, _) if lf > 0 => LineEnding::Lf,
+        (_, 0, _) if crlf > 0 => LineEnding::Crlf,
+        _ => LineEnding::Mixed,
     }
 }
 
@@ -293,9 +341,7 @@ pub fn is_text(data: &[u8]) -> bool {
     let null_count = data.iter().take(8192).filter(|&&b| b == 0).count();
     if null_count > 0 {
         // Could be UTF-16/32 if nulls are in expected positions
-        // UTF-16LE: every other byte is 0 for ASCII text
         if null_count > data.len() / 4 {
-            // Check if it looks like UTF-16
             let is_utf16_le = data.len() > 4 && data[1] == 0 && data[3] == 0;
             let is_utf16_be = data.len() > 4 && data[0] == 0 && data[2] == 0;
             return is_utf16_le || is_utf16_be;
@@ -320,7 +366,6 @@ pub fn is_text(data: &[u8]) -> bool {
 
     // If many high bytes with no valid UTF-8 sequences, likely binary
     if high_count as f64 / sample_size as f64 > 0.3 {
-        // Try to decode as UTF-8
         match std::str::from_utf8(sample) {
             Ok(_) => return true,
             Err(_) => return false,
@@ -331,8 +376,6 @@ pub fn is_text(data: &[u8]) -> bool {
     match std::str::from_utf8(sample) {
         Ok(_) => true,
         Err(_) => {
-            // Not valid UTF-8, but might be text in another encoding
-            // Check if it looks like Latin-1 or similar
             let printable = sample.iter()
                 .filter(|&&b| b >= 0x20 || b == b'\n' || b == b'\r' || b == b'\t')
                 .count();
@@ -345,7 +388,7 @@ pub fn is_text(data: &[u8]) -> bool {
 pub fn format_text_description(info: &TextInfo) -> String {
     let mut parts = Vec::new();
 
-    let enc_desc = format_encoding(&info.encoding, info.with_bom);
+    let enc_desc = info.encoding.display_name(info.with_bom);
 
     // Language/type hint first, then encoding (matches Linux format)
     if let Some(ref lang) = info.language_hint {
@@ -355,13 +398,9 @@ pub fn format_text_description(info: &TextInfo) -> String {
         parts.push(enc_desc);
     }
 
-    // Line ending (only if non-standard)
-    match info.line_ending.as_str() {
-        "CRLF" => parts.push("with CRLF line terminators".to_string()),
-        "CR" => parts.push("with CR line terminators".to_string()),
-        "no line terminators" => parts.push("with no line terminators".to_string()),
-        "mixed" => parts.push("with mixed line terminators".to_string()),
-        _ => {}
+    // Line ending
+    if let Some(desc) = info.line_ending.description() {
+        parts.push(desc.to_string());
     }
 
     // Long lines indicator
@@ -373,13 +412,6 @@ pub fn format_text_description(info: &TextInfo) -> String {
 }
 
 /// Format encoding name to match Linux `file` output
-pub fn format_encoding(encoding: &str, with_bom: bool) -> String {
-    match encoding {
-        "ascii" => "ASCII text".to_string(),
-        "utf-8" if with_bom => "UTF-8 Unicode (with BOM) text".to_string(),
-        "utf-8" => "UTF-8 Unicode text".to_string(),
-        "utf-16le" => "Little-endian UTF-16 Unicode text".to_string(),
-        "utf-16be" => "Big-endian UTF-16 Unicode text".to_string(),
-        _ => "Non-ISO extended-ASCII text".to_string(),
-    }
+pub fn format_encoding(encoding: &Encoding, with_bom: bool) -> String {
+    encoding.display_name(with_bom)
 }
